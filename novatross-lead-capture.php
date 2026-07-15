@@ -4,7 +4,7 @@
  * Description: Pushes Contact Form 7 submissions into the central HubSpot lead hub
  *              with every field mapped. Reusable for Novatross, FhirPlug and any
  *              future form. NO PHI / patient data is ever sent to HubSpot.
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author: AT
  */
 
@@ -72,6 +72,26 @@ function nv_hubspot_push_lead(array $lead) {
     }
     return true;
 }
+
+/**
+ * Honeypot spam gate (replaces reCAPTCHA v3, which was silently binning real
+ * visitors). The `nv_website` field is hidden from humans via CSS; only bots
+ * fill it. If it has a value, mark the submission as spam so no mail is sent
+ * and no lead is pushed. Real people are NEVER scored or blocked.
+ */
+add_filter('wpcf7_spam', function ($spam, $submission = null) {
+    if ($spam) { return $spam; }
+    if (!empty($_POST['nv_website'])) {
+        if ($submission && method_exists($submission, 'add_spam_log')) {
+            $submission->add_spam_log(array(
+                'agent'  => 'nv_honeypot',
+                'reason' => 'Honeypot field was filled (bot).',
+            ));
+        }
+        return true;
+    }
+    return $spam;
+}, 10, 2);
 
 /**
  * Novatross website main contact form (CF7 id 10228) -> HubSpot.
