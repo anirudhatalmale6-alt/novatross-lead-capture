@@ -4,7 +4,7 @@
  * Description: Pushes Contact Form 7 submissions into the central HubSpot lead hub
  *              with every field mapped. Reusable for Novatross, FhirPlug and any
  *              future form. NO PHI / patient data is ever sent to HubSpot.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: AT
  */
 
@@ -13,6 +13,8 @@ if (!defined('ABSPATH')) { exit; }
 // Central HubSpot lead hub (Novatross portal)
 if (!defined('NV_HS_PORTAL')) { define('NV_HS_PORTAL', '45753602'); }
 if (!defined('NV_HS_FORM_GUID')) { define('NV_HS_FORM_GUID', '6ebedcc9-131e-4250-a784-84261d1006d1'); }
+// HubSpot internal field name for the product/service dropdown (label "Product and Services").
+if (!defined('NV_HS_PRODUCT_FIELD')) { define('NV_HS_PRODUCT_FIELD', 'product_and_services'); }
 
 /**
  * Reusable push. Any form (Novatross, FhirPlug, future) can build this
@@ -27,10 +29,15 @@ function nv_hubspot_push_lead(array $lead) {
     if (empty($lead['email'])) { return false; } // email is the only required HubSpot field
 
     $fields = array();
-    foreach (array('email', 'firstname', 'lastname', 'company', 'phone', 'productservice') as $k) {
+    foreach (array('email', 'firstname', 'lastname', 'company', 'phone') as $k) {
         if (!empty($lead[$k])) {
             $fields[] = array('name' => $k, 'value' => (string) $lead[$k]);
         }
+    }
+    // Product/service dropdown -> HubSpot's select field (internal name may differ
+    // from its label, so it's kept in one constant).
+    if (!empty($lead['productservice'])) {
+        $fields[] = array('name' => NV_HS_PRODUCT_FIELD, 'value' => (string) $lead['productservice']);
     }
 
     // Preserve the raw interest + free-text + source in the Message property so a
