@@ -2,9 +2,10 @@
 /**
  * Plugin Name: Novatross Lead Capture (HubSpot)
  * Description: Pushes Contact Form 7 submissions into the central HubSpot lead hub
- *              with every field mapped. Reusable for Novatross, FhirPlug and any
- *              future form. NO PHI / patient data is ever sent to HubSpot.
- * Version: 1.3.0
+ *              with every field mapped, and gates public forms against spam
+ *              (honeypot + content heuristic). NO PHI / patient data is ever
+ *              sent to HubSpot. Reusable for Novatross, FhirPlug and future forms.
+ * Version: 1.4.0
  * Author: AT
  */
 
@@ -74,22 +75,112 @@ function nv_hubspot_push_lead(array $lead) {
 }
 
 /**
- * Honeypot spam gate (replaces reCAPTCHA v3, which was silently binning real
- * visitors). The `nv_website` field is hidden from humans via CSS; only bots
- * fill it. If it has a value, mark the submission as spam so no mail is sent
- * and no lead is pushed. Real people are NEVER scored or blocked.
+ * Record a blocked submission on the CF7 submission log + PHP error log so we
+ * can audit for any false positives.
+ */
+function nv_log_spam($submission, $agent, $reason) {
+    if ($submission && method_exists($submission, 'add_spam_log')) {
+        $submission->add_spam_log(array('agent' => $agent, 'reason' => $reason));
+    }
+    error_log('[novatross-spam] blocked :: ' . $agent . ' :: ' . $reason);
+}
+
+/**
+ * Lightweight, content-based spam scoring for public forms. Deliberately
+ * conservative: only patterns that essentially never appear in a genuine
+ * US-healthcare B2B enquiry contribute, and a real lead has to trip a very
+ * strong signal (or several weak ones) before it is blocked. Returns
+ * array($score, $reasons).
+ */
+function nv_spam_score(array $f) {
+    $score = 0;
+    $reasons = array();
+    $first   = trim((string) ($f['first'] ?? ''));
+    $last    = trim((string) ($f['last'] ?? ''));
+    $company = trim((string) ($f['company'] ?? ''));
+    $message = trim((string) ($f['message'] ?? ''));
+    $name_blob = trim($first . ' ' . $last);
+    $all = strtolower(trim($name_blob . ' ' . $company . ' ' . $message));
+
+    // 1) Predominantly non-Latin script in the message/name. This form only takes
+    //    English-language enquiries; a Cyrillic / Georgian / CJK / Arabic body is
+    //    the signature of the current spam wave. (Accented Latin names such as
+    //    "Jose" stay overwhelmingly Latin and are NOT caught.)
+    $probe   = trim($message . ' ' . $name_blob);
+    $letters = preg_match_all('/\p{L}/u', $probe);
+    $latin   = preg_match_all('/\p{Latin}/u', $probe);
+    if ($letters >= 4) {
+        $nonlatin = $letters - $latin;
+        if ($nonlatin / $letters > 0.4) {
+            $score += 4;
+            $reasons[] = 'non_latin_body(' . $nonlatin . '/' . $letters . ')';
+        }
+    }
+
+    // 2) Identical first and last name (e.g. "Roberttuh Roberttuh") - weak alone.
+    if ($first !== '' && strcasecmp($first, $last) === 0) {
+        $score += 2;
+        $reasons[] = 'identical_name';
+    }
+
+    // 3) URLs where a human never puts them, or link-stuffed messages.
+    if (preg_match('~https?://|www\.~i', $name_blob . ' ' . $company)) {
+        $score += 3;
+        $reasons[] = 'url_in_name';
+    }
+    $url_hits = preg_match_all('~https?://|www\.|\[url~i', $message);
+    if ($url_hits >= 2) {
+        $score += 3;
+        $reasons[] = 'multi_url(' . $url_hits . ')';
+    } elseif ($url_hits === 1) {
+        $score += 1;
+        $reasons[] = 'url';
+    }
+
+    // 4) Classic spam vocabulary.
+    $kw = array('seo', 'backlink', 'ranking', 'crypto', 'bitcoin', 'casino',
+                'viagra', 'cialis', 'porn', 'escort', 'payday loan',
+                'guest post', 'increase traffic', 'first page of google',
+                'rank higher', 'buy now', 'telegram', 'whatsapp us');
+    foreach ($kw as $w) {
+        if (strpos($all, $w) !== false) {
+            $score += 2;
+            $reasons[] = 'kw:' . $w;
+        }
+    }
+
+    return array($score, $reasons);
+}
+
+/**
+ * Spam gate for public CF7 forms.
+ *  - Honeypot: the CSS-hidden `nv_website` field is only ever filled by bots.
+ *  - Content heuristic: blocks the automated form-spam that clears the honeypot
+ *    (non-Latin bodies, link stuffing, spam vocabulary). Threshold 4 means a
+ *    single strong signal or multiple weak ones; real people are not scored on
+ *    anything a genuine enquiry contains.
+ * Blocked submissions send no mail and are not pushed to HubSpot.
  */
 add_filter('wpcf7_spam', function ($spam, $submission = null) {
     if ($spam) { return $spam; }
+
     if (!empty($_POST['nv_website'])) {
-        if ($submission && method_exists($submission, 'add_spam_log')) {
-            $submission->add_spam_log(array(
-                'agent'  => 'nv_honeypot',
-                'reason' => 'Honeypot field was filled (bot).',
-            ));
-        }
+        nv_log_spam($submission, 'nv_honeypot', 'Honeypot field was filled (bot).');
         return true;
     }
+
+    list($score, $reasons) = nv_spam_score(array(
+        'first'   => $_POST['text-firstname'] ?? '',
+        'last'    => $_POST['text-lastname'] ?? '',
+        'company' => $_POST['text-company'] ?? '',
+        'message' => $_POST['textarea-message'] ?? '',
+    ));
+    if ($score >= 4) {
+        nv_log_spam($submission, 'nv_content_filter',
+            'Spam score ' . $score . ' [' . implode(', ', $reasons) . ']');
+        return true;
+    }
+
     return $spam;
 }, 10, 2);
 
